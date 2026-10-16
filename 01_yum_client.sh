@@ -1,31 +1,78 @@
+
 #!/bin/bash
 
-# Variables Which Can Any System Admin Change As Per Their Need!
-HTTP_PATH=/var/www/html/rhel
+# =====================================================
+# RHEL YUM/DNF CLIENT REPOSITORY CONFIGURATION SCRIPT
+# =====================================================
+
+# Variables that the system administrator can change
+HTTP_PATH="/var/www/html/rhel"
 PACKAGE_NAME=("AppStream" "BaseOS")
-REPO_CONFIG_PATH=/etc/yum.repos.d/local.repo
+REPO_CONFIG_PATH="/etc/yum.repos.d/local.repo"
 
-touch $REPO_CONFIG_PATH
+# Check root privileges
+if [[ $EUID -ne 0 ]]; then
+    echo "Error: Please run this script as root."
+    echo "Usage: sudo bash yum_client.sh"
+    exit 1
+fi
 
-# Get a user input from user to store the $USER_SERVER_IP from which user can use its local RPM / YUM / DNF.
-USER_SERVER_IP
+# Get repository server IP address
+read -rp "Enter the Repository Server IP address: " USER_SERVER_IP
 
-# Creating Repo File With It's Content
-# Looping Through Package Names To Create Repo File
-for i in "${PACKAGE_NAME[@]}";
-do
-    echo "[${i}]" >> $REPO_CONFIG_PATH
-    echo "name=${i}" >> $REPO_CONFIG_PATH
-    echo "baseurl=http://$USER_SERVER_IP/$HTTP_PATH/${i}" >> $REPO_CONFIG_PATH
-    echo "gpgcheck=0" >> $REPO_CONFIG_PATH
-    echo "metadata_expire=-1" >> $REPO_CONFIG_PATH
-    echo "enabled=1" >> $REPO_CONFIG_PATH
-    echo "" >> $REPO_CONFIG_PATH
+# Validate input
+if [[ -z "$USER_SERVER_IP" ]]; then
+    echo "Error: Repository Server IP cannot be empty."
+    exit 1
+fi
+
+# Backup existing repository configuration
+if [[ -f "$REPO_CONFIG_PATH" ]]; then
+    cp -a "$REPO_CONFIG_PATH" \
+        "${REPO_CONFIG_PATH}.bak.$(date +%Y%m%d%H%M%S)"
+    echo "Backup of existing local.repo created."
+fi
+
+# Create repository configuration file
+cat > "$REPO_CONFIG_PATH" <<EOF
+EOF
+
+# Configure AppStream and BaseOS repositories
+for i in "${PACKAGE_NAME[@]}"; do
+    cat >> "$REPO_CONFIG_PATH" <<EOF
+[$i]
+name=RHEL $i Local Repository
+baseurl=http://${USER_SERVER_IP}${HTTP_PATH}/${i}/
+enabled=1
+gpgcheck=0
+metadata_expire=-1
+
+EOF
 done
 
-# Set Up & Check Repos
-dnf clean all
-dnf repolist all -v
+echo "Repository configuration created:"
+cat "$REPO_CONFIG_PATH"
 
-echo "You can now install softwares using:"
-echo "dnf install <rpm_name>"
+# Refresh repository metadata
+echo
+echo "Cleaning DNF/YUM cache..."
+dnf clean all
+
+echo
+echo "Refreshing repository metadata..."
+if ! dnf makecache; then
+    echo "Error: Failed to refresh repository metadata."
+    echo "Check the server IP, HTTP access, and repository paths."
+    exit 1
+fi
+
+# Display enabled repositories
+echo
+echo "Available repositories:"
+dnf repolist
+
+echo
+echo "Repository setup completed successfully!"
+echo "You can now install packages using:"
+echo "dnf install <package_name>"
+
