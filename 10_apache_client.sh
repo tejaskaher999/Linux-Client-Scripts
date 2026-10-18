@@ -1,90 +1,64 @@
+
 #!/bin/bash
 
 # ============================================================
-# Script Name : 10_apache_client.sh
-# Purpose     : Configure client /etc/hosts and test Apache sites
-# OS          : Rocky Linux / RHEL
+# Apache Web Server - Client Configuration and Testing
+# Compatible with Rocky Linux / RHEL
 # ============================================================
 
 set -o pipefail
 
-# -------------------- DEFAULT VARIABLES ---------------------
-
+HOSTS_FILE="/etc/hosts"
 DEFAULT_SERVER_IP="192.168.78.128"
 DEFAULT_HTTP_PORT="80"
 DEFAULT_WEBSITES="server.skynet.com,www.skynet.com"
 DEFAULT_TEST_PATH="/"
 
-# -------------------- COLORS --------------------------------
+# -------------------- DISPLAY -------------------------------
 
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-RED='\033[0;31m'
-BLUE='\033[0;34m'
-NC='\033[0m'
-
-# -------------------- FUNCTIONS -----------------------------
-
-print_line() {
+show_header() {
+    echo
+    echo "============================================================"
+    echo "       APACHE WEB SERVER - CLIENT CONFIGURATION"
     echo "============================================================"
 }
 
+info() {
+    echo "[INFO] $*"
+}
+
 success() {
-    echo -e "${GREEN}[SUCCESS]${NC} $1"
+    echo "[SUCCESS] $*"
 }
 
 warning() {
-    echo -e "${YELLOW}[WARNING]${NC} $1"
+    echo "[WARNING] $*"
 }
 
 error() {
-    echo -e "${RED}[ERROR]${NC} $1"
+    echo "[ERROR] $*" >&2
 }
 
-info() {
-    echo -e "${BLUE}[INFO]${NC} $1"
-}
+# -------------------- ROOT CHECK ----------------------------
 
-ask_value() {
-    local prompt="$1"
-    local default="$2"
-    local result
+if [[ $EUID -ne 0 ]]; then
+    error "Run this script as root."
+    echo "Example: sudo ./10_apache_client.sh"
+    exit 1
+fi
 
-    read -r -p "$prompt [$default]: " result
-    REPLY="${result:-$default}"
-}
-
-valid_hostname() {
-    local name="$1"
-    local label
-    local IFS='.'
-
-    [[ ${#name} -le 253 &&
-       "$name" =~ ^[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$ &&
-       "$name" != *..* ]] || return 1
-
-    read -r -a labels <<< "$name"
-
-    for label in "${labels[@]}"; do
-        [[ ${#label} -le 63 &&
-           "$label" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?$ ]] ||
-            return 1
-    done
-
-    return 0
-}
+# -------------------- INPUT VALIDATION ----------------------
 
 valid_ipv4() {
     local ip="$1"
     local octet
-    local -a octets
+    local -a parts
 
-    [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
+    IFS='.' read -r -a parts <<< "$ip"
 
-    IFS='.' read -r -a octets <<< "$ip"
-    [[ ${#octets[@]} -eq 4 ]] || return 1
+    [[ ${#parts[@]} -eq 4 ]] || return 1
 
-    for octet in "${octets[@]}"; do
+    for octet in "${parts[@]}"; do
         [[ "$octet" =~ ^[0-9]{1,3}$ ]] || return 1
         (( 10#$octet <= 255 )) || return 1
     done
@@ -92,443 +66,438 @@ valid_ipv4() {
     return 0
 }
 
-# -------------------- ROOT CHECK -----------------------------
 
-if [[ "$EUID" -ne 0 ]]; then
-    error "Run this script as root."
-    echo "Example: sudo bash 10_apache_client.sh"
-    exit 1
+valid_hostname() {
+    local name="$1"
+    local label
+
+    [[ ${#name} -le 253 ]] || return 1
+    [[ "$name" =~ ^[A-Za-z0-9.-]+$ ]] || return 1
+    [[ "$name" != .* && "$name" != *. ]] || return 1
+    [[ "$name" != *..* ]] || return 1
+
+    IFS='.' read -r -a labels <<< "$name"
+
+    for label in "${labels[@]}"; do
+        [[ -n "$label" && ${#label} -le 63 ]] || return 1
+        [[ "$label" =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$ ]] || return 1
+    done
+
+    return 0
+}
+
+
+# -------------------- SYSTEM INFORMATION --------------------
+
+show_header
+
+echo "Client hostname: $(hostname -f 2>/dev/null || hostname)"
+echo
+echo "Client IP addresses:"
+
+if command -v ip >/dev/null 2>&1; then
+    ip -brief address show
+else
+    warning "'ip' command not found."
 fi
 
-# -------------------- OS CHECK -------------------------------
-
-if [[ ! -f /etc/os-release ]]; then
-    error "Cannot identify the operating system."
-    exit 1
-fi
-
-source /etc/os-release
-
-if [[ "$ID" != "rocky" && "$ID" != "rhel" &&
-      "${ID_LIKE:-}" != *rhel* ]]; then
-    warning "This script is intended for RHEL / Rocky Linux."
-    read -r -p "Continue anyway? (y/n): " OS_CONFIRM
-
-    if [[ ! "$OS_CONFIRM" =~ ^[Yy]$ ]]; then
-        exit 1
-    fi
-fi
-
-# -------------------- HEADER ---------------------------------
+# -------------------- CONFIGURATION -------------------------
 
 echo
-print_line
-echo "          APACHE WEB SERVER - CLIENT CONFIGURATION"
-print_line
-echo "This script manages client-side hostname entries and tests"
-echo "websites hosted on a remote Apache server."
-echo
-echo "Current client hostname: $(hostname -f 2>/dev/null || hostname)"
-echo "Current client IP addresses:"
-ip -br -4 addr
-echo
-
-# -------------------- INTERACTIVE VARIABLES ------------------
-
-echo
-print_line
+echo "============================================================"
 echo "               CONFIGURATION VARIABLES"
-print_line
+echo "============================================================"
 
-ask_value "Apache server IPv4 address" "$DEFAULT_SERVER_IP"
-SERVER_IP="$REPLY"
+read -r -p "Apache server IPv4 address [$DEFAULT_SERVER_IP]: " SERVER_IP
+SERVER_IP="${SERVER_IP:-$DEFAULT_SERVER_IP}"
 
-ask_value "Apache HTTP port" "$DEFAULT_HTTP_PORT"
-HTTP_PORT="$REPLY"
+while ! valid_ipv4 "$SERVER_IP"; do
+    error "Invalid IPv4 address."
+    read -r -p "Enter Apache server IPv4 address: " SERVER_IP
+done
 
-ask_value "Website hostnames, comma-separated" "$DEFAULT_WEBSITES"
-WEBSITES_INPUT="$REPLY"
+read -r -p "Apache HTTP port [$DEFAULT_HTTP_PORT]: " HTTP_PORT
+HTTP_PORT="${HTTP_PORT:-$DEFAULT_HTTP_PORT}"
 
-ask_value "Website test path" "$DEFAULT_TEST_PATH"
-TEST_PATH="$REPLY"
+while ! [[ "$HTTP_PORT" =~ ^[0-9]+$ ]] ||
+      (( 10#$HTTP_PORT < 1 || 10#$HTTP_PORT > 65535 )); do
+    error "Port must be between 1 and 65535."
+    read -r -p "Enter HTTP port: " HTTP_PORT
+done
 
-if [[ "$TEST_PATH" != /* ]]; then
-    TEST_PATH="/$TEST_PATH"
-fi
+HTTP_PORT=$((10#$HTTP_PORT))
 
-# -------------------- VALIDATE VARIABLES ---------------------
+read -r -p "Website hostnames, comma-separated [$DEFAULT_WEBSITES]: " WEBSITES
+WEBSITES="${WEBSITES:-$DEFAULT_WEBSITES}"
 
-if ! valid_ipv4 "$SERVER_IP"; then
-    error "Invalid IPv4 address: $SERVER_IP"
+read -r -p "Website test path [$DEFAULT_TEST_PATH]: " TEST_PATH
+TEST_PATH="${TEST_PATH:-$DEFAULT_TEST_PATH}"
+
+[[ "$TEST_PATH" == /* ]] || TEST_PATH="/$TEST_PATH"
+
+# Avoid malformed URLs and command-line confusion.
+if [[ "$TEST_PATH" == *" "* || "$TEST_PATH" == *"#"* ]]; then
+    error "Test path must not contain spaces or a fragment (#)."
     exit 1
 fi
 
-if [[ ! "$HTTP_PORT" =~ ^[0-9]+$ ]] ||
-   (( 10#$HTTP_PORT < 1 || 10#$HTTP_PORT > 65535 )); then
-    error "Invalid TCP port: $HTTP_PORT"
-    exit 1
-fi
+# Parse, normalize and deduplicate hostnames.
+WEBSITES="${WEBSITES//;/,}"
+IFS=',' read -r -a INPUT_HOSTS <<< "$WEBSITES"
 
-# Validate the path to avoid malformed request URLs.
-if [[ "$TEST_PATH" =~ [[:space:][:cntrl:]] ]]; then
-    error "The test path must not contain spaces or control characters."
-    exit 1
-fi
+declare -a SITES=()
+declare -A SEEN_HOSTS=()
 
-# Convert comma-separated hostnames into an array.
-IFS=',' read -r -a WEBSITES <<< "$WEBSITES_INPUT"
-
-# Trim surrounding spaces and remove duplicate names.
-CLEAN_WEBSITES=()
-
-for site in "${WEBSITES[@]}"; do
-    site="${site#"${site%%[![:space:]]*}"}"
-    site="${site%"${site##*[![:space:]]}"}"
+for site in "${INPUT_HOSTS[@]}"; do
+    site="$(echo "$site" | tr '[:upper:]' '[:lower:]' | xargs)"
 
     [[ -z "$site" ]] && continue
 
     if ! valid_hostname "$site"; then
-        error "Invalid website hostname: $site"
+        error "Invalid hostname: $site"
         exit 1
     fi
 
-    duplicate="no"
-
-    for existing in "${CLEAN_WEBSITES[@]}"; do
-        if [[ "${existing,,}" == "${site,,}" ]]; then
-            duplicate="yes"
-            break
-        fi
-    done
-
-    if [[ "$duplicate" == "no" ]]; then
-        CLEAN_WEBSITES+=("$site")
+    if [[ -z "${SEEN_HOSTS[$site]+x}" ]]; then
+        SITES+=("$site")
+        SEEN_HOSTS["$site"]=1
     fi
 done
 
-if [[ ${#CLEAN_WEBSITES[@]} -eq 0 ]]; then
+if [[ ${#SITES[@]} -eq 0 ]]; then
     error "Enter at least one website hostname."
     exit 1
 fi
 
-# -------------------- CONFIGURATION SUMMARY ------------------
+# -------------------- SUMMARY -------------------------------
 
 echo
-print_line
+echo "============================================================"
 echo "                 CONFIGURATION SUMMARY"
-print_line
+echo "============================================================"
 echo "Apache server IP : $SERVER_IP"
 echo "HTTP port        : $HTTP_PORT"
 echo "Test path        : $TEST_PATH"
-echo "Client hosts file: /etc/hosts"
+echo "Client hosts file: $HOSTS_FILE"
 echo
 echo "Websites to check:"
 
-for site in "${CLEAN_WEBSITES[@]}"; do
+for site in "${SITES[@]}"; do
     echo "  - $site"
 done
 
-print_line
-echo
-echo "The script can back up and update /etc/hosts."
-echo "It will preserve unrelated host entries."
-echo
+echo "============================================================"
 
 read -r -p "Continue with these settings? (y/n): " CONFIRM
 
 if [[ ! "$CONFIRM" =~ ^[Yy]$ ]]; then
-    warning "Cancelled. No changes made."
+    info "Cancelled. No changes made."
     exit 0
 fi
 
-# -------------------- CHECK REQUIRED COMMANDS -----------------
+# -------------------- REQUIRED COMMANDS ---------------------
 
 echo
 info "Checking required commands..."
 
-for cmd in awk grep sed getent curl nc mktemp; do
+MISSING=()
+
+for cmd in awk grep sed getent curl nc cp mktemp; do
     if ! command -v "$cmd" >/dev/null 2>&1; then
-        error "Required command '$cmd' was not found."
-        echo "Install curl and nmap-ncat if required:"
-        echo "  dnf install -y curl nmap-ncat"
-        exit 1
+        MISSING+=("$cmd")
     fi
 done
 
-# -------------------- HOSTS FILE UPDATE OPTION ---------------
+if [[ ${#MISSING[@]} -gt 0 ]]; then
+    error "Missing commands: ${MISSING[*]}"
+    echo "Install the required tools using:"
+    echo "  dnf install -y curl nmap-ncat"
+    echo "Then run this script again."
+    exit 1
+fi
+
+# -------------------- HOSTS FILE MENU -----------------------
 
 echo
-print_line
+echo "============================================================"
 echo "                 CLIENT HOSTS FILE"
-print_line
+echo "============================================================"
 echo "1. Add/update website entries in /etc/hosts"
 echo "2. Skip hosts file changes and only test websites"
-echo
 
 read -r -p "Choose option [1-2]: " HOSTS_OPTION
 
 case "$HOSTS_OPTION" in
     1)
-        HOSTS_FILE="/etc/hosts"
-
         if [[ ! -f "$HOSTS_FILE" ]]; then
-            error "/etc/hosts does not exist."
+            error "$HOSTS_FILE does not exist."
             exit 1
         fi
 
-        # Create a backup before editing.
-        HOSTS_BACKUP="/etc/hosts.backup.$(date +%Y%m%d_%H%M%S)"
+        BACKUP="${HOSTS_FILE}.backup.$(date +%Y%m%d_%H%M%S)"
 
-        if ! cp -a "$HOSTS_FILE" "$HOSTS_BACKUP"; then
-            error "Could not back up /etc/hosts."
+        if ! cp -p "$HOSTS_FILE" "$BACKUP"; then
+            error "Could not back up $HOSTS_FILE."
             exit 1
         fi
 
-        info "Backup created: $HOSTS_BACKUP"
+        success "Backup created: $BACKUP"
 
-        # Build a comma-separated list for awk.
-        TARGET_HOSTS=""
-        for site in "${CLEAN_WEBSITES[@]}"; do
-            TARGET_HOSTS+="${TARGET_HOSTS:+,}${site}"
-        done
+        TMP_FILE="$(mktemp)" || exit 1
 
-        HOSTS_TEMP="$(mktemp)" || {
-            error "Could not create a temporary file."
-            exit 1
+        # Remove only the configured website aliases from old entries.
+        # Preserve unrelated hostnames and comments.
+        TARGETS="$(IFS=,; echo "${SITES[*]}")"
+
+        if ! awk -v targets="$TARGETS" '
+        BEGIN {
+            count = split(targets, t, ",")
+            for (i = 1; i <= count; i++)
+                wanted[tolower(t[i])] = 1
         }
+        {
+            original = $0
+            body = $0
+            comment = ""
 
-        # Remove only the selected hostnames from old entries.
-        # Preserve other hostnames, comments and unrelated records.
-        if ! awk \
-            -v ip="$SERVER_IP" \
-            -v target_list="$TARGET_HOSTS" \
-            '
-            BEGIN {
-                count = split(target_list, list, ",")
-                for (i = 1; i <= count; i++) {
-                    target[tolower(list[i])] = 1
+            hash = index(body, "#")
+            if (hash > 0) {
+                comment = substr(body, hash)
+                body = substr(body, 1, hash - 1)
+            }
+
+            trimmed = body
+            gsub(/^[ \t]+|[ \t]+$/, "", trimmed)
+
+            if (trimmed == "") {
+                print original
+                next
+            }
+
+            n = split(trimmed, fields, /[ \t]+/)
+            ip = fields[1]
+            output = ip
+            matched = 0
+            aliases = 0
+
+            for (i = 2; i <= n; i++) {
+                name = tolower(fields[i])
+
+                if (name in wanted) {
+                    matched = 1
+                } else {
+                    output = output " " fields[i]
+                    aliases++
                 }
             }
 
-            {
-                original = $0
-                line = $0
-                comment = ""
-
-                hashpos = index(line, "#")
-                if (hashpos > 0) {
-                    comment = substr(line, hashpos)
-                    line = substr(line, 1, hashpos - 1)
-                }
-
-                gsub(/^[ \t]+|[ \t]+$/, "", line)
-
-                if (line == "") {
-                    print original
-                    next
-                }
-
-                n = split(line, fields, /[ \t]+/)
-                changed = 0
-                output = fields[1]
-
-                for (i = 2; i <= n; i++) {
-                    if (tolower(fields[i]) in target) {
-                        changed = 1
-                    } else {
-                        output = output " " fields[i]
-                    }
-                }
-
-                if (!changed) {
-                    print original
-                    next
-                }
-
-                # If other aliases remain, preserve them.
-                if (n > 1 && output != fields[1]) {
-                    print output (comment != "" ? " " comment : "")
-                } else if (comment != "") {
-                    print comment
-                }
+            if (!matched) {
+                print original
+            } else if (aliases > 0) {
+                print output (comment != "" ? " " comment : "")
+            } else if (comment != "") {
+                print comment
             }
-
-            END {
-                printf "%s", ""
-            }
-            ' "$HOSTS_FILE" > "$HOSTS_TEMP"; then
-
-            rm -f "$HOSTS_TEMP"
-            error "Failed to prepare the updated hosts file."
+        }' "$HOSTS_FILE" > "$TMP_FILE"; then
+            rm -f "$TMP_FILE"
+            error "Failed while processing $HOSTS_FILE."
             exit 1
         fi
 
-        # Add the configured websites together on one line.
-        printf '%s' "$SERVER_IP" >> "$HOSTS_TEMP"
+        # Add all configured websites on one hosts-file line.
+        {
+            echo
+            printf '%s' "$SERVER_IP"
+            for site in "${SITES[@]}"; do
+                printf ' %s' "$site"
+            done
+            echo
+        } >> "$TMP_FILE"
 
-        for site in "${CLEAN_WEBSITES[@]}"; do
-            printf ' %s' "$site" >> "$HOSTS_TEMP"
+        if ! cat "$TMP_FILE" > "$HOSTS_FILE"; then
+            cp -p "$BACKUP" "$HOSTS_FILE"
+            rm -f "$TMP_FILE"
+            error "Could not update $HOSTS_FILE. Backup restored."
+            exit 1
+        fi
+
+        rm -f "$TMP_FILE"
+        success "Updated $HOSTS_FILE"
+        echo
+        echo "Added entry:"
+        printf '%s' "$SERVER_IP"
+        for site in "${SITES[@]}"; do
+            printf ' %s' "$site"
         done
-
-        printf '\n' >> "$HOSTS_TEMP"
-
-        if ! cat "$HOSTS_TEMP" > "$HOSTS_FILE"; then
-            rm -f "$HOSTS_TEMP"
-            error "Could not update /etc/hosts."
-            warning "Backup: $HOSTS_BACKUP"
-            exit 1
-        fi
-
-        rm -f "$HOSTS_TEMP"
-
-        success "Client /etc/hosts updated successfully."
-        echo "Backup: $HOSTS_BACKUP"
+        echo
         ;;
 
     2)
         info "Skipping /etc/hosts modifications."
+        echo "Hostname resolution may fail if DNS or /etc/hosts"
+        echo "does not already contain these website names."
         ;;
 
     *)
-        error "Invalid choice."
+        error "Invalid option. Choose 1 or 2."
         exit 1
         ;;
 esac
 
-# -------------------- DISPLAY HOSTS ENTRIES ------------------
+# -------------------- HOSTNAME RESOLUTION -------------------
 
 echo
-print_line
+echo "============================================================"
 echo "             HOSTNAME RESOLUTION CHECK"
-print_line
+echo "============================================================"
 
-for site in "${CLEAN_WEBSITES[@]}"; do
+RESOLUTION_FAILURES=0
+
+for site in "${SITES[@]}"; do
     echo
     echo "Website: $site"
 
-    RESOLVED_IPS="$(getent ahostsv4 "$site" 2>/dev/null |
-        awk '!seen[$1]++ {print $1}')"
-
-    if [[ -n "$RESOLVED_IPS" ]]; then
-        echo "Resolved IPv4 address(es):"
-        echo "$RESOLVED_IPS"
-
-        if grep -Fxq "$SERVER_IP" <<< "$RESOLVED_IPS"; then
-            success "$site resolves to $SERVER_IP."
-        else
-            warning "$site resolves, but not to the configured server IP."
-            echo "The website test below will explicitly target $SERVER_IP."
-        fi
+    if getent ahostsv4 "$site" 2>/dev/null |
+        awk -v expected="$SERVER_IP" '$1 == expected { found=1 } END { exit !found }'; then
+        success "$site resolves to $SERVER_IP."
     else
-        warning "Hostname did not resolve through the system resolver."
+        warning "$site does not resolve to $SERVER_IP through the system resolver."
+        ((RESOLUTION_FAILURES++))
     fi
 done
 
-# -------------------- TEST TCP CONNECTIVITY -------------------
+# -------------------- SERVER PORT CHECK ---------------------
 
 echo
-print_line
+echo "============================================================"
 echo "                 HTTP PORT CHECK"
-print_line
+echo "============================================================"
 echo "Testing $SERVER_IP on TCP port $HTTP_PORT..."
 
-if timeout 5 nc -z -w 3 "$SERVER_IP" "$HTTP_PORT"; then
+if nc -z -w 5 "$SERVER_IP" "$HTTP_PORT" >/dev/null 2>&1; then
     success "TCP port $HTTP_PORT is reachable on $SERVER_IP."
+    PORT_REACHABLE=1
 else
-    error "Cannot connect to $SERVER_IP:$HTTP_PORT."
-    warning "Check Apache, firewalld, network routing and server IP."
+    error "TCP port $HTTP_PORT is not reachable on $SERVER_IP."
+    warning "Check Apache status, firewall rules, IP address and port."
+    PORT_REACHABLE=0
 fi
 
-# -------------------- TEST EACH WEBSITE -----------------------
+# -------------------- WEBSITE TESTS -------------------------
 
 echo
-print_line
+echo "============================================================"
 echo "                  WEBSITE TEST RESULTS"
-print_line
+echo "============================================================"
 
-TEMP_BODY="$(mktemp)" || {
-    error "Could not create a temporary response file."
-    exit 1
-}
+HTTP_FAILURES=0
+HTTP_SUCCESSES=0
 
-trap 'rm -f "$TEMP_BODY"' EXIT
+for site in "${SITES[@]}"; do
+    URL="http://${site}:${HTTP_PORT}${TEST_PATH}"
 
-for site in "${CLEAN_WEBSITES[@]}"; do
     echo
-    print_line
+    echo "============================================================"
     echo "Website hostname : $site"
     echo "Target server IP : $SERVER_IP"
-    echo "Test URL         : http://${site}:${HTTP_PORT}${TEST_PATH}"
-    print_line
+    echo "Test URL         : $URL"
+    echo "============================================================"
 
-    # --resolve makes curl connect to the specified IP while
-    # sending the correct Host header for Apache virtual hosting.
-    HTTP_STATUS="$(
-        curl --noproxy '*' \
-            --connect-timeout 5 \
-            --max-time 15 \
-            --silent --show-error \
-            --resolve "${site}:${HTTP_PORT}:${SERVER_IP}" \
-            --output "$TEMP_BODY" \
-            --write-out '%{http_code}' \
-            "http://${site}:${HTTP_PORT}${TEST_PATH}" 2>/dev/null
-    )"
-    CURL_STATUS=$?
+    # --resolve sends the request to the specified server IP while
+    # preserving the hostname in the HTTP Host header.
+    # This allows virtual-host testing even if DNS is not configured.
+    RESULT="$(curl --noproxy '*' \
+        --resolve "${site}:${HTTP_PORT}:${SERVER_IP}" \
+        --connect-timeout 5 \
+        --max-time 15 \
+        --silent --show-error \
+        --output - \
+        --write-out $'\n__HTTP_STATUS__:%{http_code}\n' \
+        "$URL" 2>&1)"
 
-    if [[ $CURL_STATUS -eq 0 && "$HTTP_STATUS" =~ ^[0-9]{3}$ ]]; then
-        if [[ "$HTTP_STATUS" =~ ^2[0-9][0-9]$ ||
-              "$HTTP_STATUS" =~ ^3[0-9][0-9]$ ]]; then
-            success "HTTP response: $HTTP_STATUS"
-        else
-            warning "Server responded with HTTP status: $HTTP_STATUS"
-        fi
+    CURL_RC=$?
 
-        echo
-        echo "Response body preview (first 10 lines):"
-        sed -n '1,10p' "$TEMP_BODY"
-
-    else
-        error "Website request failed."
-        echo "curl exit code: $CURL_STATUS"
-        echo "Check that Apache is running and the website is configured."
+    if [[ $CURL_RC -ne 0 ]]; then
+        error "HTTP request failed for $site (curl exit code $CURL_RC)."
+        echo "$RESULT" | tail -n 5
+        ((HTTP_FAILURES++))
+        continue
     fi
+
+    HTTP_STATUS="$(printf '%s\n' "$RESULT" |
+        sed -n 's/^__HTTP_STATUS__:\([0-9][0-9][0-9]\)$/\1/p' |
+        tail -n 1)"
+
+    BODY="$(printf '%s\n' "$RESULT" |
+        sed '/^__HTTP_STATUS__:[0-9][0-9][0-9]$/d')"
+
+    if [[ "$HTTP_STATUS" =~ ^2[0-9][0-9]$ ]]; then
+        success "HTTP response: $HTTP_STATUS"
+        ((HTTP_SUCCESSES++))
+    elif [[ "$HTTP_STATUS" =~ ^[0-9]{3}$ ]]; then
+        warning "HTTP response: $HTTP_STATUS"
+        ((HTTP_FAILURES++))
+    else
+        warning "Could not determine HTTP status."
+        ((HTTP_FAILURES++))
+    fi
+
+    echo
+    echo "Response body preview (first 10 lines):"
+    printf '%s\n' "$BODY" | head -n 10
 done
 
-rm -f "$TEMP_BODY"
-trap - EXIT
-
-# -------------------- FINAL SUMMARY ---------------------------
+# -------------------- FINAL SUMMARY ------------------------
 
 echo
-print_line
+echo "============================================================"
 echo "             APACHE CLIENT TEST COMPLETED"
-print_line
-
-echo "Server IP        : $SERVER_IP"
-echo "HTTP port        : $HTTP_PORT"
-echo "Hosts file       : /etc/hosts"
-echo "Websites checked : ${#CLEAN_WEBSITES[@]}"
-
+echo "============================================================"
+echo "Server IP            : $SERVER_IP"
+echo "HTTP port            : $HTTP_PORT"
+echo "Hosts file           : $HOSTS_FILE"
+echo "Websites checked     : ${#SITES[@]}"
+echo "HTTP successes       : $HTTP_SUCCESSES"
+echo "HTTP failures        : $HTTP_FAILURES"
+echo "Resolution warnings  : $RESOLUTION_FAILURES"
+echo "TCP port reachable   : $PORT_REACHABLE"
 echo
-echo "Configured website entries:"
-for site in "${CLEAN_WEBSITES[@]}"; do
-    echo "$SERVER_IP $site"
+
+echo "Website hostnames:"
+for site in "${SITES[@]}"; do
+    echo "  $site -> $SERVER_IP (HTTP test target)"
 done
 
 echo
 echo "Useful commands:"
 echo "  getent hosts <website-hostname>"
-echo "  curl http://<website-hostname>/"
-echo "  curl http://$SERVER_IP/ -H 'Host: <website-hostname>'"
+echo "  curl http://<website-hostname>:${HTTP_PORT}${TEST_PATH}"
+echo "  curl --resolve <website-hostname>:${HTTP_PORT}:${SERVER_IP} \\"
+echo "       http://<website-hostname>:${HTTP_PORT}${TEST_PATH}"
 echo "  nc -zv $SERVER_IP $HTTP_PORT"
 
 echo
-echo "If a website fails, check on the Apache server:"
+echo "If a website fails, check on the Apache SERVER:"
 echo "  httpd -t"
 echo "  httpd -S"
 echo "  systemctl status httpd"
 echo "  firewall-cmd --list-all"
 echo "  journalctl -u httpd -n 30 --no-pager"
 
-print_line
+if (( RESOLUTION_FAILURES > 0 )); then
+    echo
+    warning "Some names did not resolve through the system resolver."
+    echo "Choose option 1 next time to update /etc/hosts, or configure DNS."
+    echo "HTTP tests can still succeed because curl --resolve bypasses DNS."
+fi
+
+echo "============================================================"
+
+# A failed HTTP request or unreachable server should produce a
+# non-zero exit status, useful for automation and Jenkins.
+if (( HTTP_FAILURES > 0 || PORT_REACHABLE == 0 )); then
+    exit 1
+fi
+
+exit 0
 
